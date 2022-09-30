@@ -1,13 +1,11 @@
 import numpy as np
-# from numba import njit, float32, int32, boolean, prange, gdb_init, gdb_breakpoint
-# from numba.core.types import Tuple
-# from numba.typed import List
-from numba import njit
+import pandas as pd
 import numexpr as ne
 import os
 from math import ceil
 from multiprocessing import cpu_count, Pool
 from joblib import Parallel, delayed
+from matplotlib import pyplot as plt
 
 os.environ['NUMBA_GDB_BINARY'] = '/usr/bin/gdb'
 
@@ -16,10 +14,9 @@ def calculate_distances(data, vp_idx, point_idc, distances):
     distances[point_idc] = np.linalg.norm(data[point_idc] - data[vp_idx], axis=1)
 
 
-def vpTreeLevel(data, tree, medians, level_nodes, level_idc, parent_idc,
+def vpTreeLevel(data, tree, medians, level_node_idc, level_idc, parent_idc,
                 curr_max_idx, prev_max_idx, empty_arr, distances):
-    level_row_idc = np.arange(level_nodes)
-    for curr_node_row_idx in level_row_idc:
+    for curr_node_row_idx in level_node_idc:
         curr_node_idx = prev_max_idx + 1 + curr_node_row_idx
         node_idc = parent_idc[curr_node_row_idx]
         node_idc_len = node_idc.shape[0]
@@ -44,7 +41,29 @@ def vpTreeLevel(data, tree, medians, level_nodes, level_idc, parent_idc,
             level_idc[curr_node_row_idx: curr_node_row_idx + 2] = empty_arr
 
 
-def vpTree(data: np.ndarray):
+def load_balancer(sequential_threshold, data, tree, medians, level_nodes, level_idc, parent_idc, curr_max_idx,
+                  prev_max_idx,
+                  empty_arr, distances):
+    level_node_idc = np.arange(level_nodes)
+    if level_nodes < sequential_threshold:
+        vpTreeLevel(data, tree, medians, level_node_idc, level_idc, parent_idc, curr_max_idx, prev_max_idx, empty_arr,
+                    distances)
+    else:
+        cores = cpu_count()
+        pool = Pool(cores)
+        batch_size = ceil(level_nodes / cores)
+        for core in range(cores):
+            start = core * batch_size
+            end = (core + 1) * batch_size
+            if end > level_nodes:
+                end = level_nodes
+            pool.apply_async(vpTreeLevel, args=(data, tree, medians, level_node_idc[start: end], level_idc, parent_idc,
+                                                curr_max_idx, prev_max_idx, empty_arr, distances))
+        pool.close()
+        pool.join()
+
+
+def vpTree(data: np.ndarray, sequential_threshold):
     depth = int(np.ceil(np.log2(data.shape[0] + 1) - 1))
     max_nodes = 2 ** (depth + 1) - 1
     tree = -np.ones((max_nodes, 3), dtype=np.int32)
@@ -77,8 +96,8 @@ def vpTree(data: np.ndarray):
         curr_max_idx = prev_max_idx + level_nodes
         level_idc = [empty_idc for x in range(level_nodes * 2)]
 
-        vpTreeLevel(data, tree, medians, level_nodes, level_idc, parent_idc, curr_max_idx, prev_max_idx, empty_arr,
-                    distances)
+        load_balancer(sequential_threshold, data, tree, medians, level_nodes, level_idc, parent_idc, curr_max_idx,
+                      prev_max_idx, empty_arr, distances)
 
         parent_idc = level_idc
         prev_max_idx = curr_max_idx
@@ -87,13 +106,48 @@ def vpTree(data: np.ndarray):
 
 
 if __name__ == '__main__':
-
-    # time line of code
     import time
 
-    # benchmark vptree
-    for i in range(1, 7):
-        start_time = time.time()
-        points = np.random.rand(10 ** i, 2).astype(np.float32)
-        tree = vpTree(points)
-        print(f"--- %s seconds | 10^{i} | {sequential_threshold} ---" % (time.time() - start_time))
+    thresholds = [4, 16, 64, 256, 1024, 4096]
+    if 'benchmark_data.csv' not in os.listdir():
+        benchmark_data = []
+        # benchmark vptree
+        for i in range(1, 6):
+            points = np.random.rand(10 ** i, 2).astype(np.float32)
+            for threshold in thresholds:
+                print(f'points shape: {points.shape} | threshold: {threshold}')
+                for iteration in range(10):
+                    start_time = time.time()
+                    tree = vpTree(points, threshold)
+                    time_diff = time.time() - start_time
+                    benchmark_data.append([points.shape[0], threshold, time_diff, iteration])
+
+        # save benchmark data
+        benchmark_data = pd.DataFrame(benchmark_data, columns=['points', 'threshold', 'time', 'iteration'])
+        benchmark_data.to_csv('benchmark_data.csv', index=False)
+    else:
+        benchmark_data = pd.read_csv('benchmark_data.csv')
+
+
+    benchmark_data_means = benchmark_data.groupby(['points', 'threshold'])['time'].mean().reset_index()
+    benchmark_data_std = benchmark_data.groupby(['points', 'threshold'])['time'].std().reset_index()
+    print(benchmark_data)
+    fig, axes = plt.subplots(2, 3)
+
+    for i, threshold in enumerate(thresholds):
+        ax = axes[i // 3, i % 3]
+
+        benchmark_data_means_threshold = benchmark_data_means[benchmark_data_means['threshold'] == threshold]
+        benchmark_data_std_threshold = benchmark_data_std[benchmark_data_std['threshold'] == threshold]
+
+        ax.errorbar(benchmark_data_means_threshold['points'], benchmark_data_means_threshold['time'],
+                    yerr=benchmark_data_std_threshold['time'])
+
+        ax.set_title(f'threshold: {threshold}')
+        ax.set_xlabel('points')
+        ax.set_ylabel('time')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+
+    fig.tight_layout()
+    fig.savefig('benchmark.png', dpi=300)
