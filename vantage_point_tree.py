@@ -2,10 +2,12 @@ import numpy as np
 import pandas as pd
 import numexpr as ne
 import os
-from math import ceil
+from math import ceil, inf
 from multiprocessing import cpu_count, Pool
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
+import bisect
+import collections
 
 os.environ['NUMBA_GDB_BINARY'] = '/usr/bin/gdb'
 
@@ -29,16 +31,16 @@ def vpTreeLevel(data, tree, medians, level_node_idc, level_idc, parent_idc,
             inner = distances[point_idc] <= median
             inner_idc = point_idc[inner]
             outer_idc = point_idc[~inner]
-            level_idc[curr_node_row_idx] = inner_idc
-            level_idc[curr_node_row_idx + 1] = outer_idc
+            level_idc[2*curr_node_row_idx] = inner_idc
+            level_idc[2*curr_node_row_idx + 1] = outer_idc
             curr_node_child_left = curr_max_idx + 1 + 2 * curr_node_row_idx
             tree[curr_node_idx] = [vp_idx, curr_node_child_left, curr_node_child_left + 1]
         elif node_idc_len == 1:
-            level_idc[curr_node_row_idx: curr_node_row_idx + 2] = empty_arr
+            level_idc[2*curr_node_row_idx: 2*curr_node_row_idx + 2] = empty_arr
             tree[curr_node_idx] = [node_idc[0], -1, -1]
-            medians[curr_node_idx] = -1
+            medians[curr_node_idx] = 0
         else:
-            level_idc[curr_node_row_idx: curr_node_row_idx + 2] = empty_arr
+            level_idc[2*curr_node_row_idx: 2*curr_node_row_idx + 2] = empty_arr
 
 
 def load_balancer(sequential_threshold, data, tree, medians, level_nodes, level_idc, parent_idc, curr_max_idx,
@@ -105,6 +107,62 @@ def vpTree(data: np.ndarray, sequential_threshold):
     return tree, medians
 
 
+def is_leaf(node):
+    return node[1] == -1 and node[2] == -1
+
+
+def get_n_nearest_neighbors(data, tree, medians, query, n_neighbors):
+    if not isinstance(n_neighbors, int) or n_neighbors < 1:
+        raise ValueError('n_neighbors must be strictly positive integer')
+    tree = np.concatenate((tree, medians), axis=1)
+    neighbors = _AutoSortingList(max_size=n_neighbors)
+    queue = collections.deque([tree[0]])
+    furthest_d = inf
+    need_neighbors = True
+
+    while queue:
+        node = queue.popleft()
+        if node[0] == -1:
+            continue
+        d = np.linalg.norm(query - data[int(node[0])])
+
+        if d < furthest_d or need_neighbors:
+            neighbors.append((d, int(node[0])))
+            furthest_d = neighbors[-1][0]
+            if need_neighbors:
+                need_neighbors = len(neighbors) < n_neighbors
+
+        if is_leaf(node):
+            continue
+
+        left = int(node[1]) if node[1] != -1 else None
+        right = int(node[2]) if node[2] != -1 else None
+
+        if d < node[-1]:
+            if (left is not None) and d - furthest_d <= node[-1]:
+                queue.append(tree[left])
+            if (right is not None) and d + furthest_d >= node[-1]:
+                queue.append(tree[right])
+        else:
+            if (right is not None) and d + furthest_d >= node[-1]:
+                queue.append(tree[right])
+            if (left is not None) and d - furthest_d <= node[-1]:
+                queue.append(tree[left])
+
+    return list(neighbors)
+
+
+class _AutoSortingList(list):
+    def __init__(self, max_size=None, *args):
+        super(_AutoSortingList, self).__init__(*args)
+        self.max_size = max_size
+
+    def append(self, item):
+        self.insert(bisect.bisect_left(self, item), item)
+        if self.max_size is not None and len(self) > self.max_size:
+            self.pop()
+
+
 if __name__ == '__main__':
     import time
 
@@ -151,3 +209,10 @@ if __name__ == '__main__':
 
     fig.tight_layout()
     fig.savefig('benchmark.png', dpi=300)
+
+    points = np.random.rand(100, 2).astype(np.float32)
+    tree, medians = vpTree(points, 256)
+    query = np.random.rand(2).astype(np.float32)
+    k = 10
+    k_nearest = get_n_nearest_neighbors(points, tree, medians, query, k)
+    print(k_nearest)
