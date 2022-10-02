@@ -189,7 +189,6 @@ if __name__ == '__main__':
 
     benchmark_data_means = benchmark_data.groupby(['points', 'threshold'])['time'].mean().reset_index()
     benchmark_data_std = benchmark_data.groupby(['points', 'threshold'])['time'].std().reset_index()
-    print(benchmark_data)
     fig, axes = plt.subplots(2, 3)
 
     for i, threshold in enumerate(thresholds):
